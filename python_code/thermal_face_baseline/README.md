@@ -118,7 +118,7 @@ cd D:\major\IRsegementation\IRrecognize\python_code\thermal_face_baseline
 - `--max-interpolation-seconds`：低分主脸候选可沿用上一位置进行关联的最长时间，默认 `0.20` 秒。
 - `--save-images auto`：BIN 输入默认只把没有关联到主脸的帧保存到 `missed/`，不再保存每一张成功帧。
 
-输出 AVI 会包含帧号、候选数、检测框、关键点和 `PRIMARY` 主脸标记。`0.30～0.39` 为橙色、`0.40～0.59` 为黄色、`0.60` 及以上为绿色；`missed/` 中只保留未关联到主脸的帧。`detections.csv` 会记录所有已处理帧的 `frame_index`、原始温度最小值、最大值和平均值。
+输出 AVI 会包含帧号、候选数、检测框、关键点和 `PRIMARY` 主脸标记。低于 `0.40` 的候选为橙色、`0.40～0.59` 为黄色、`0.60` 及以上为绿色；`missed/` 中只保留未关联到主脸的帧。`detections.csv` 会记录所有已处理帧的 `frame_index`、原始温度最小值、最大值和平均值。
 
 如果需要保存所有标注帧用于逐张核查，可以添加 `--save-images all`；完全不保存静态图则使用 `--save-images none`。
 
@@ -138,7 +138,7 @@ cd D:\major\IRsegementation\IRrecognize\python_code\thermal_face_baseline
 .\.venv\Scripts\python.exe .\run_inference.py --input .\input_images --output .\output\conf_040 --conf-thres 0.40
 ```
 
-Notebook 的运动人脸实验使用候选阈值 `0.30` 和可靠阈值 `0.40`。`0.30～0.39` 的候选只有在位置与近期 `PRIMARY` 主脸连续时才会被选中，不能单独初始化主脸轨迹。
+Notebook 的运动人脸实验使用候选阈值 `0.10` 和可靠阈值 `0.40`。`0.10～0.39` 的候选只有在位置和面积与近期 `PRIMARY` 主脸连续时才会被选中，不能单独初始化主脸轨迹。检测始终使用原始热像生成的 8 位检测视图，不做 CLAHE 或边缘增强；后续 ROI 温度数据必须从原始 `uint16` 帧换算后裁剪，不能从检测视图或标注图中取值。
 
 若输出目录已经包含结果，程序会自动新建 `_2`、`_3` 后缀目录，不会清空旧结果。
 
