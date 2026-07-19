@@ -57,8 +57,14 @@ LANDMARK_COLORS = (
     (255, 0, 0),
 )
 HIGH_CONFIDENCE_THRESHOLD = 0.60
+MEDIUM_CONFIDENCE_THRESHOLD = 0.40
 HIGH_CONFIDENCE_COLOR = (0, 200, 0)
-LOW_CONFIDENCE_COLOR = (0, 255, 255)
+MEDIUM_CONFIDENCE_COLOR = (0, 255, 255)
+LOW_CONFIDENCE_COLOR = (0, 165, 255)
+PRIMARY_FACE_COLOR = (255, 255, 0)
+MAX_CENTER_DISTANCE_RATIO = 0.75
+MIN_AREA_RATIO = 0.50
+MAX_AREA_RATIO = 2.00
 VENDOR_COMMIT = "152c688d551aefb973b7b589fb0691c93dab3564"
 MODEL_SOURCE = "https://github.com/IS2AI/TFW"
 TRUSTED_TFW_SHA256 = "5596275882839ab6e21177cc15572dd56c71c3fcafd2b0ea3b3ffa45d2c2677a"
@@ -98,7 +104,13 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         default=800,
         help="网络输入长边尺寸，TFW 官方训练配置为 800。",
     )
-    parser.add_argument("--conf-thres", type=float, default=0.60, help="置信度阈值。")
+    parser.add_argument("--conf-thres", type=float, default=0.60, help="候选人脸置信度阈值。")
+    parser.add_argument(
+        "--reliable-conf-thres",
+        type=float,
+        default=0.40,
+        help="可独立建立或重新建立主脸轨迹的可靠置信度阈值。",
+    )
     parser.add_argument("--iou-thres", type=float, default=0.50, help="NMS IoU 阈值。")
     parser.add_argument(
         "--device",
@@ -181,12 +193,20 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         default=1,
         help="每多少个已处理帧打印一次进度；漏检帧始终打印。",
     )
+    parser.add_argument(
+        "--max-interpolation-seconds",
+        type=float,
+        default=0.20,
+        help="主脸关联允许沿用上一检测位置的最长时间；后续也用于短缺失插值。",
+    )
     return parser.parse_args(argv)
 
 
 def validate_args(args: argparse.Namespace) -> None:
     if not 0.0 <= args.conf_thres <= 1.0:
         raise ValueError("--conf-thres 必须在 0 到 1 之间。")
+    if not 0.0 <= args.reliable_conf_thres <= 1.0:
+        raise ValueError("--reliable-conf-thres 必须在 0 到 1 之间。")
     if not 0.0 <= args.iou_thres <= 1.0:
         raise ValueError("--iou-thres 必须在 0 到 1 之间。")
     if not 0.0 <= args.lower_percentile < args.upper_percentile <= 100.0:
@@ -207,6 +227,8 @@ def validate_args(args: argparse.Namespace) -> None:
         raise ValueError("--show-every 必须大于 0。")
     if args.log_every <= 0:
         raise ValueError("--log-every 必须大于 0。")
+    if args.max_interpolation_seconds < 0:
+        raise ValueError("--max-interpolation-seconds 不能小于 0。")
     video_name = Path(args.video_name)
     if video_name.suffix.lower() != ".avi":
         raise ValueError("--video-name 必须使用 .avi 扩展名。")
@@ -295,11 +317,17 @@ def draw_frame_status(
     image: np.ndarray,
     frame_index: int | None,
     face_count: int,
+    primary_confidence: float | None,
 ) -> None:
     frame_text = f"frame {frame_index}" if frame_index is not None else "image"
-    status = f"{frame_text} | faces {face_count}"
-    color = (0, 220, 0) if face_count else (0, 0, 255)
-    cv2.rectangle(image, (0, 0), (320, 32), (0, 0, 0), -1)
+    primary_text = "none" if primary_confidence is None else f"{primary_confidence:.2f}"
+    status = f"{frame_text} | faces {face_count} | primary {primary_text}"
+    color = (
+        confidence_color(primary_confidence)
+        if primary_confidence is not None
+        else (0, 0, 255)
+    )
+    cv2.rectangle(image, (0, 0), (440, 32), (0, 0, 0), -1)
     cv2.putText(image, status, (8, 23), cv2.FONT_HERSHEY_SIMPLEX, 0.62, color, 2)
 
 
@@ -405,13 +433,17 @@ def scale_landmarks(
     return landmarks
 
 
+def confidence_color(confidence: float) -> tuple[int, int, int]:
+    if confidence >= HIGH_CONFIDENCE_THRESHOLD:
+        return HIGH_CONFIDENCE_COLOR
+    if confidence >= MEDIUM_CONFIDENCE_THRESHOLD:
+        return MEDIUM_CONFIDENCE_COLOR
+    return LOW_CONFIDENCE_COLOR
+
+
 def draw_detection(image: np.ndarray, detection: np.ndarray) -> None:
     x1, y1, x2, y2, confidence = detection[:5]
-    box_color = (
-        HIGH_CONFIDENCE_COLOR
-        if float(confidence) >= HIGH_CONFIDENCE_THRESHOLD
-        else LOW_CONFIDENCE_COLOR
-    )
+    box_color = confidence_color(float(confidence))
     cv2.rectangle(image, (round(x1), round(y1)), (round(x2), round(y2)), box_color, 2)
     label = f"face {confidence:.2f}"
     text_y = max(round(y1) - 8, 18)
@@ -419,6 +451,76 @@ def draw_detection(image: np.ndarray, detection: np.ndarray) -> None:
     for index, color in enumerate(LANDMARK_COLORS):
         point_x, point_y = detection[5 + 2 * index : 7 + 2 * index]
         cv2.circle(image, (round(point_x), round(point_y)), 3, color, -1)
+
+
+def bbox_area(detection: np.ndarray) -> float:
+    width = max(float(detection[2] - detection[0]), 0.0)
+    height = max(float(detection[3] - detection[1]), 0.0)
+    return width * height
+
+
+def is_position_consistent(candidate: np.ndarray, previous: np.ndarray) -> bool:
+    previous_width = max(float(previous[2] - previous[0]), 1.0)
+    previous_height = max(float(previous[3] - previous[1]), 1.0)
+    previous_diagonal = float(np.hypot(previous_width, previous_height))
+    previous_center = np.array(
+        ((previous[0] + previous[2]) / 2.0, (previous[1] + previous[3]) / 2.0)
+    )
+    candidate_center = np.array(
+        ((candidate[0] + candidate[2]) / 2.0, (candidate[1] + candidate[3]) / 2.0)
+    )
+    center_distance = float(np.linalg.norm(candidate_center - previous_center))
+    previous_area = max(bbox_area(previous), 1.0)
+    area_ratio = bbox_area(candidate) / previous_area
+    return (
+        center_distance <= MAX_CENTER_DISTANCE_RATIO * previous_diagonal
+        and MIN_AREA_RATIO <= area_ratio <= MAX_AREA_RATIO
+    )
+
+
+def select_primary_detection(
+    detections: np.ndarray,
+    previous: np.ndarray | None,
+    reliable_conf_thres: float,
+) -> np.ndarray | None:
+    """选择单个主脸；低分候选必须与近期主脸在位置和面积上连续。"""
+
+    if len(detections) == 0:
+        return None
+
+    if previous is not None:
+        consistent = [
+            detection for detection in detections if is_position_consistent(detection, previous)
+        ]
+        if consistent:
+            return max(consistent, key=lambda detection: float(detection[4])).copy()
+
+    reliable = [
+        detection
+        for detection in detections
+        if float(detection[4]) >= reliable_conf_thres
+    ]
+    if reliable:
+        return max(reliable, key=lambda detection: float(detection[4])).copy()
+    return None
+
+
+def draw_primary_detection(image: np.ndarray, detection: np.ndarray) -> None:
+    x1, y1, x2, y2 = (round(float(value)) for value in detection[:4])
+    height, width = image.shape[:2]
+    outer_top_left = (max(x1 - 4, 0), max(y1 - 4, 0))
+    outer_bottom_right = (min(x2 + 4, width - 1), min(y2 + 4, height - 1))
+    cv2.rectangle(image, outer_top_left, outer_bottom_right, PRIMARY_FACE_COLOR, 2)
+    label_y = y2 + 20 if y2 + 20 < height else max(y1 + 20, 18)
+    cv2.putText(
+        image,
+        "PRIMARY",
+        (max(x1, 0), label_y),
+        cv2.FONT_HERSHEY_SIMPLEX,
+        0.55,
+        PRIMARY_FACE_COLOR,
+        2,
+    )
 
 
 def sha256(path: Path) -> str:
@@ -613,6 +715,18 @@ def main(argv: list[str] | None = None) -> Path:
     csv_rows: list[dict[str, Any]] = []
     per_image: list[dict[str, Any]] = []
     total_faces = 0
+    primary_frame_count = 0
+    low_confidence_primary_count = 0
+    previous_primary: np.ndarray | None = None
+    previous_primary_frame: int | None = None
+    max_primary_gap_frames = max(
+        0, round(args.max_interpolation_seconds * args.source_fps)
+    )
+    print(
+        f"主脸关联：候选阈值 {args.conf_thres:.2f}，"
+        f"可靠阈值 {args.reliable_conf_thres:.2f}，"
+        f"最长短缺失 {max_primary_gap_frames} 帧"
+    )
     effective_save_images = args.save_images
     if effective_save_images == "auto":
         effective_save_images = "missed" if is_bin else "all"
@@ -678,11 +792,34 @@ def main(argv: list[str] | None = None) -> Path:
         synchronize(device)
         nms_ms = (time.perf_counter() - nms_start) * 1000
 
+        previous_for_selection: np.ndarray | None = None
+        if is_bin and previous_primary is not None and previous_primary_frame is not None:
+            assert frame_index is not None
+            missing_since_primary = max(frame_index - previous_primary_frame - 1, 0)
+            if missing_since_primary <= max_primary_gap_frames:
+                previous_for_selection = previous_primary
+        selected_primary = select_primary_detection(
+            detection_array,
+            previous_for_selection,
+            args.reliable_conf_thres,
+        )
+        if selected_primary is not None:
+            previous_primary = selected_primary.copy() if is_bin else None
+            previous_primary_frame = frame_index if is_bin else None
+            primary_frame_count += 1
+            if float(selected_primary[4]) < args.reliable_conf_thres:
+                low_confidence_primary_count += 1
+        primary_confidence = (
+            float(selected_primary[4]) if selected_primary is not None else None
+        )
+
         annotated = image_bgr.copy()
         for detection in detection_array:
             draw_detection(annotated, detection)
+        if selected_primary is not None:
+            draw_primary_detection(annotated, selected_primary)
         face_count = len(detection_array)
-        draw_frame_status(annotated, frame_index, face_count)
+        draw_frame_status(annotated, frame_index, face_count, primary_confidence)
         if frame_index is None:
             output_name = f"{image_index:04d}_{image_path.stem}.png"
             display_name = image_path.name
@@ -691,7 +828,7 @@ def main(argv: list[str] | None = None) -> Path:
             display_name = f"{image_path.name} frame={frame_index}"
 
         should_save_image = effective_save_images == "all" or (
-            effective_save_images == "missed" and face_count == 0
+            effective_save_images == "missed" and selected_primary is None
         )
         output_image: Path | None = None
         if should_save_image and still_dir is not None:
@@ -734,6 +871,12 @@ def main(argv: list[str] | None = None) -> Path:
                 "frame_index": frame_index,
                 "saved_image": str(output_image) if output_image is not None else None,
                 "face_count": face_count,
+                "primary_detected": selected_primary is not None,
+                "primary_confidence": (
+                    round(primary_confidence, 6)
+                    if primary_confidence is not None
+                    else None
+                ),
                 **{key: round(value, 3) for key, value in timings.items()},
             }
         )
@@ -773,12 +916,17 @@ def main(argv: list[str] | None = None) -> Path:
             image_index == 1
             or image_index == input_count
             or image_index % args.log_every == 0
-            or face_count == 0
+            or selected_primary is None
         )
         if should_log:
+            primary_log = (
+                f"主脸 {primary_confidence:.2f}"
+                if primary_confidence is not None
+                else "未关联主脸"
+            )
             print(
                 f"[{image_index}/{input_count}] {display_name}: "
-                f"{face_count} 张人脸，推理 {inference_ms:.1f} ms"
+                f"{face_count} 个候选，{primary_log}，推理 {inference_ms:.1f} ms"
             )
         if stopped_by_user:
             print("收到 Q/Esc，提前停止并保存已完成结果。")
@@ -807,6 +955,9 @@ def main(argv: list[str] | None = None) -> Path:
         "torch_version": torch.__version__,
         "image_size": image_size,
         "conf_threshold": args.conf_thres,
+        "reliable_conf_threshold": args.reliable_conf_thres,
+        "max_primary_gap_frames": max_primary_gap_frames,
+        "max_interpolation_seconds": args.max_interpolation_seconds,
         "iou_threshold": args.iou_thres,
         "normalization": args.normalization,
         "selected_frame_count": input_count,
@@ -828,6 +979,9 @@ def main(argv: list[str] | None = None) -> Path:
         else None,
         "images_with_faces": sum(item["face_count"] > 0 for item in per_image),
         "images_without_faces": sum(item["face_count"] == 0 for item in per_image),
+        "frames_with_primary": primary_frame_count,
+        "frames_without_primary": len(per_image) - primary_frame_count,
+        "low_confidence_primary_frames": low_confidence_primary_count,
         "total_faces": total_faces,
         "mean_inference_ms": round(statistics.mean(item["inference_ms"] for item in per_image), 3),
         "mean_total_ms": round(statistics.mean(item["total_ms"] for item in per_image), 3),
