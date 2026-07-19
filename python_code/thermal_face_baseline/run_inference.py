@@ -45,6 +45,7 @@ from thermal_bin import (  # noqa: E402
     read_bin_header,
     select_frame_indices,
 )
+from roi_export import export_roi_artifacts, require_hdf5storage  # noqa: E402
 
 
 IMAGE_SUFFIXES = {".jpg", ".jpeg", ".png", ".bmp", ".tif", ".tiff"}
@@ -204,6 +205,26 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         default=0.20,
         help="主脸关联允许沿用上一检测位置的最长时间；后续也用于短缺失插值。",
     )
+    parser.add_argument(
+        "--save-roi-mat",
+        action="store_true",
+        help="从原始 BIN 温度帧导出 MATLAB v7.3 ROI Tensor 和轨迹坐标。",
+    )
+    parser.add_argument(
+        "--save-roi-preview",
+        action="store_true",
+        help="生成逐帧 ROI/口鼻框跟踪预览 roi_tracking_preview.avi。",
+    )
+    parser.add_argument("--roi-size", type=int, default=128, help="完整人脸 ROI 边长。")
+    parser.add_argument(
+        "--small-roi-size", type=int, default=64, help="口鼻 ROI 边长。"
+    )
+    parser.add_argument(
+        "--mat-chunk-frames",
+        type=int,
+        default=3000,
+        help="每个 MATLAB v7.3 文件最多保存的帧数。",
+    )
     return parser.parse_args(argv)
 
 
@@ -228,6 +249,12 @@ def validate_args(args: argparse.Namespace) -> None:
         raise ValueError("--max-frames 不能小于 0。")
     if args.source_fps <= 0:
         raise ValueError("--source-fps 必须大于 0。")
+    if args.roi_size <= 0 or args.small_roi_size <= 0:
+        raise ValueError("--roi-size 和 --small-roi-size 必须大于 0。")
+    if args.mat_chunk_frames <= 0:
+        raise ValueError("--mat-chunk-frames 必须大于 0。")
+    if (args.save_roi_mat or args.save_roi_preview) and args.frame_step != 1:
+        raise ValueError("启用 ROI 导出时 --frame-step 必须为 1，确保时间轴连续。")
     if args.show_every <= 0:
         raise ValueError("--show-every 必须大于 0。")
     if args.log_every <= 0:
@@ -681,6 +708,11 @@ def main(argv: list[str] | None = None) -> Path:
         raise FileNotFoundError(f"未找到权重文件：{weights_path}")
 
     is_bin = input_path.is_file() and input_path.suffix.lower() == ".bin"
+    roi_requested = args.save_roi_mat or args.save_roi_preview
+    if roi_requested and not is_bin:
+        raise ValueError("ROI Tensor/预览目前只支持原始 16UC1 BIN 输入。")
+    if args.save_roi_mat:
+        require_hdf5storage()
     bin_info: ThermalBinInfo | None = None
     if is_bin:
         bin_info = read_bin_header(input_path)
@@ -725,6 +757,8 @@ def main(argv: list[str] | None = None) -> Path:
     total_faces = 0
     primary_frame_count = 0
     low_confidence_primary_count = 0
+    roi_frame_indices: list[int] = []
+    roi_primary_detections: list[np.ndarray | None] = []
     previous_primary: np.ndarray | None = None
     previous_primary_frame: int | None = None
     max_primary_gap_frames = max(
@@ -820,6 +854,12 @@ def main(argv: list[str] | None = None) -> Path:
         primary_confidence = (
             float(selected_primary[4]) if selected_primary is not None else None
         )
+        if is_bin:
+            assert frame_index is not None
+            roi_frame_indices.append(frame_index)
+            roi_primary_detections.append(
+                selected_primary.copy() if selected_primary is not None else None
+            )
 
         annotated = image_bgr.copy()
         for detection in detection_array:
@@ -953,6 +993,34 @@ def main(argv: list[str] | None = None) -> Path:
         except cv2.error:
             pass
 
+    roi_export_summary: dict[str, Any] | None = None
+    if roi_requested:
+        print("开始从原始温度帧导出 ROI；检测视图和标注图不会作为温度数据来源。")
+
+        def roi_preview_view(raw_frame: np.ndarray) -> np.ndarray:
+            view, _ = make_detection_view(
+                raw_frame,
+                args.normalization,
+                args.lower_percentile,
+                args.upper_percentile,
+            )
+            return view
+
+        roi_export_summary = export_roi_artifacts(
+            bin_path=input_path,
+            output_dir=output_dir,
+            frame_indices=roi_frame_indices,
+            primary_detections=roi_primary_detections,
+            source_fps=args.source_fps,
+            max_interpolation_frames=max_primary_gap_frames,
+            roi_size=args.roi_size,
+            small_roi_size=args.small_roi_size,
+            mat_chunk_frames=args.mat_chunk_frames,
+            save_mat=args.save_roi_mat,
+            save_preview=args.save_roi_preview,
+            preview_view=roi_preview_view if args.save_roi_preview else None,
+        )
+
     write_csv(output_dir / "detections.csv", csv_rows)
     summary = {
         "task": "thermal_face_detection_and_5_landmarks",
@@ -995,6 +1063,7 @@ def main(argv: list[str] | None = None) -> Path:
         "frames_with_primary": primary_frame_count,
         "frames_without_primary": len(per_image) - primary_frame_count,
         "low_confidence_primary_frames": low_confidence_primary_count,
+        "roi_export": roi_export_summary,
         "total_faces": total_faces,
         "mean_inference_ms": round(statistics.mean(item["inference_ms"] for item in per_image), 3),
         "mean_total_ms": round(statistics.mean(item["total_ms"] for item in per_image), 3),
@@ -1012,6 +1081,18 @@ def main(argv: list[str] | None = None) -> Path:
         print(f"静态图片（{effective_save_images}）：{still_dir}，共 {saved_image_count} 张")
     if video_path is not None:
         print(f"AVI 视频：{video_path}")
+    if roi_export_summary is not None:
+        print(
+            "ROI 导出："
+            f"检测 {roi_export_summary['detected_frames']} 帧，"
+            f"插值 {roi_export_summary['interpolated_frames']} 帧，"
+            f"长缺失 {roi_export_summary['invalid_frames']} 帧"
+        )
+        if roi_export_summary["mat_files"]:
+            print(f"ROI MAT：{', '.join(roi_export_summary['mat_files'])}")
+        print(f"ROI 轨迹表：{roi_export_summary['track_csv']}")
+        if roi_export_summary["preview_video"]:
+            print(f"ROI 预览：{roi_export_summary['preview_video']}")
     print(f"检测表：{output_dir / 'detections.csv'}")
     print(f"汇总表：{output_dir / 'summary.json'}")
     return output_dir

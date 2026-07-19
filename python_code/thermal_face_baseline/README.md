@@ -139,7 +139,49 @@ cd D:\major\IRsegementation\IRrecognize\python_code\thermal_face_baseline
 .\.venv\Scripts\python.exe .\run_inference.py --input .\input_images --output .\output\conf_040 --conf-thres 0.40
 ```
 
-Notebook 的运动人脸实验使用候选阈值 `0.10` 和可靠阈值 `0.40`。`0.10～0.39` 的候选只有在位置和面积与近期 `PRIMARY` 主脸连续时才会被选中，不能单独初始化主脸轨迹。检测始终使用原始热像生成的 8 位检测视图，不做 CLAHE 或边缘增强；后续 ROI 温度数据必须从原始 `uint16` 帧换算后裁剪，不能从检测视图或标注图中取值。
+Notebook 的候选下限由 `CONF_THRESHOLD` 控制，可靠阈值使用 `RELIABLE_CONF_THRESHOLD=0.40`。低于可靠阈值的候选只有在位置和面积与近期 `PRIMARY` 主脸连续时才会被选中，不能单独初始化主脸轨迹。检测始终使用原始热像生成的 8 位检测视图，不做 CLAHE 或边缘增强；后续 ROI 温度数据必须从原始 `uint16` 帧换算后裁剪，不能从检测视图或标注图中取值。
+
+## 温度 ROI Tensor 与 MATLAB 输出
+
+Notebook 中启用以下参数后，会在检测完成后重新按帧读取原始 BIN，并导出摄氏温度 ROI：
+
+```python
+SAVE_ROI_MAT = True
+SAVE_ROI_PREVIEW = True
+ROI_SIZE = 128
+SMALL_ROI_SIZE = 64
+MAX_INTERPOLATION_SECONDS = 0.20
+MAT_CHUNK_FRAMES = 3000
+```
+
+ROI 导出要求 `FRAME_STEP=1`。30 FPS 时，前后均有有效主脸且连续缺失不超过 6 帧，会线性插值人脸框和关键点，再从缺失帧自己的原始温度图裁剪；不会对温度像素做时间插值。更长缺失、开头缺失和结尾缺失保持 `NaN`。
+
+- `roiTensor`：`128×128×T single`，完整人脸框向外扩展 5% 后的摄氏温度。
+- `smallTensor`：`64×64×T single`，鼻尖与嘴角附近口鼻区域的摄氏温度。
+- `frameIndices`：`T×1 int64`，原始 BIN 帧号。
+- `timeSeconds`：`T×1 double`，原始帧号除以采集帧率。
+- `roiStatus`：`T×1 uint8`，`0=长缺失`、`1=真实检测`、`2=短缺失位置插值`。
+- `confidence`：`T×1 single`，仅真实检测有值，插值和长缺失为 `NaN`。
+- `bbox`、`landmarks`：原始人脸框和五点坐标。
+- `roiBbox`、`smallBbox`：实际用于裁剪的完整 ROI 与口鼻 ROI 坐标。
+- `roiCenter`：`T×2 single`，每帧完整 ROI 中心的原图 `[x,y]` 坐标；无效帧为 `NaN`。不保存中心位移。
+- `roiCoverage`、`smallCoverage`：ROI 位于原图内的有效覆盖比例。
+
+不超过 3000 帧时生成 `roiTensor.mat`；更长序列生成 `roiTensor_part001.mat` 等分片及 `roiManifest.mat`。`roi_track.csv` 提供相同的逐帧状态、坐标、中心位置和覆盖率，`roi_tracking_preview.avi` 用于人工检查实际采用的框。
+
+MATLAB 中可以按块读取 v7.3 文件：
+
+```matlab
+m = matfile('roiTensor.mat');
+size(m, 'roiTensor')
+
+roi100 = m.roiTensor(:, :, 1:100);
+center = m.roiCenter;       % T×2，每行是 [x, y]
+status = m.roiStatus;       % 0/1/2
+frames = m.frameIndices;
+```
+
+如果当前 Notebook 内核缺少写入依赖，可在 Notebook 中执行 `%pip install "hdf5storage>=0.2,<0.3"`，然后重启内核。
 
 若输出目录已经包含结果，程序会自动新建 `_2`、`_3` 后缀目录，不会清空旧结果。
 
