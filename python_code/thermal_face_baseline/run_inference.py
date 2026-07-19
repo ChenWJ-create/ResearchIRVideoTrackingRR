@@ -56,6 +56,9 @@ LANDMARK_COLORS = (
     (0, 255, 0),
     (255, 0, 0),
 )
+HIGH_CONFIDENCE_THRESHOLD = 0.60
+HIGH_CONFIDENCE_COLOR = (0, 200, 0)
+LOW_CONFIDENCE_COLOR = (0, 255, 255)
 VENDOR_COMMIT = "152c688d551aefb973b7b589fb0691c93dab3564"
 MODEL_SOURCE = "https://github.com/IS2AI/TFW"
 TRUSTED_TFW_SHA256 = "5596275882839ab6e21177cc15572dd56c71c3fcafd2b0ea3b3ffa45d2c2677a"
@@ -404,10 +407,15 @@ def scale_landmarks(
 
 def draw_detection(image: np.ndarray, detection: np.ndarray) -> None:
     x1, y1, x2, y2, confidence = detection[:5]
-    cv2.rectangle(image, (round(x1), round(y1)), (round(x2), round(y2)), (0, 200, 0), 2)
+    box_color = (
+        HIGH_CONFIDENCE_COLOR
+        if float(confidence) >= HIGH_CONFIDENCE_THRESHOLD
+        else LOW_CONFIDENCE_COLOR
+    )
+    cv2.rectangle(image, (round(x1), round(y1)), (round(x2), round(y2)), box_color, 2)
     label = f"face {confidence:.2f}"
     text_y = max(round(y1) - 8, 18)
-    cv2.putText(image, label, (round(x1), text_y), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 200, 0), 2)
+    cv2.putText(image, label, (round(x1), text_y), cv2.FONT_HERSHEY_SIMPLEX, 0.55, box_color, 2)
     for index, color in enumerate(LANDMARK_COLORS):
         point_x, point_y = detection[5 + 2 * index : 7 + 2 * index]
         cv2.circle(image, (round(point_x), round(point_y)), 3, color, -1)
