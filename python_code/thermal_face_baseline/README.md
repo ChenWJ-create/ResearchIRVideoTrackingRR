@@ -114,11 +114,12 @@ cd D:\major\IRsegementation\IRrecognize\python_code\thermal_face_baseline
 - `--show-every`：每多少个已处理帧刷新一次窗口，默认 `5`；它只影响实时窗口，不影响检测、CSV、漏检图片或 AVI。
 - `--save-video`：生成 `detection_preview.avi`，使用兼容性较好的 MJPG 编码。
 - `--source-fps`：原始视频帧率，默认 `30`；当 `frame-step=1` 时 AVI 保持该帧率和完整时间长度。
+- `--conf-thres`：进入 NMS 的候选置信度下限，默认 `0.10`；低分候选不会直接计为主脸。
 - `--reliable-conf-thres`：可独立建立或重新建立主脸的可靠阈值，默认 `0.40`。
 - `--max-interpolation-seconds`：低分主脸候选可沿用上一位置进行关联的最长时间，默认 `0.20` 秒。
 - `--save-images auto`：BIN 输入默认只把没有关联到主脸的帧保存到 `missed/`，不再保存每一张成功帧。
 
-输出 AVI 会包含帧号、候选数、检测框、关键点和 `PRIMARY` 主脸标记。低于 `0.40` 的候选为橙色、`0.40～0.59` 为黄色、`0.60` 及以上为绿色；`missed/` 中只保留未关联到主脸的帧。`detections.csv` 会记录所有已处理帧的 `frame_index`、原始温度最小值、最大值和平均值。
+输出 AVI 会包含帧号、候选数、检测框、关键点和 `PRIMARY` 主脸标记。低于 `0.40` 的候选为橙色、`0.40～0.59` 为黄色、`0.60` 及以上为绿色；`missed/` 中只保留未关联到主脸的帧。`detections.csv` 会记录所有已处理帧的 `frame_index`、置信度和原始温度统计，其中 `is_primary=1` 表示该候选已通过可靠阈值或时序门控，被正式计为该帧主脸。
 
 如果需要保存所有标注帧用于逐张核查，可以添加 `--save-images all`；完全不保存静态图则使用 `--save-images none`。
 

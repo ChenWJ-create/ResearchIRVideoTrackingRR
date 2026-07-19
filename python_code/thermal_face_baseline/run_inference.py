@@ -104,7 +104,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         default=800,
         help="网络输入长边尺寸，TFW 官方训练配置为 800。",
     )
-    parser.add_argument("--conf-thres", type=float, default=0.60, help="候选人脸置信度阈值。")
+    parser.add_argument(
+        "--conf-thres",
+        type=float,
+        default=0.10,
+        help="候选人脸置信度下限；低于可靠阈值的候选还必须通过时序位置和面积门控。",
+    )
     parser.add_argument(
         "--reliable-conf-thres",
         type=float,
@@ -586,6 +591,7 @@ def detection_row(
     face_count: int,
     face_index: int | str,
     detection: np.ndarray | None,
+    is_primary: bool,
     timings: dict[str, float],
     device: torch.device,
 ) -> dict[str, Any]:
@@ -603,6 +609,7 @@ def detection_row(
         "temperature_mean_c": metadata.get("temperature_mean_c", ""),
         "face_count": face_count,
         "face_index": face_index,
+        "is_primary": int(is_primary),
         "confidence": "",
         "x1": "",
         "y1": "",
@@ -648,6 +655,7 @@ def write_csv(path: Path, rows: list[dict[str, Any]]) -> None:
         "temperature_mean_c",
         "face_count",
         "face_index",
+        "is_primary",
         "confidence",
         "x1",
         "y1",
@@ -883,6 +891,9 @@ def main(argv: list[str] | None = None) -> Path:
 
         if face_count:
             for face_index, detection in enumerate(detection_array, start=1):
+                is_primary = selected_primary is not None and np.allclose(
+                    detection[:5], selected_primary[:5], rtol=1e-5, atol=1e-4
+                )
                 csv_rows.append(
                     detection_row(
                         image_path,
@@ -893,6 +904,7 @@ def main(argv: list[str] | None = None) -> Path:
                         face_count,
                         face_index,
                         detection,
+                        is_primary,
                         timings,
                         device,
                     )
@@ -908,6 +920,7 @@ def main(argv: list[str] | None = None) -> Path:
                     0,
                     "",
                     None,
+                    False,
                     timings,
                     device,
                 )
@@ -990,7 +1003,11 @@ def main(argv: list[str] | None = None) -> Path:
     with (output_dir / "summary.json").open("w", encoding="utf-8") as stream:
         json.dump(summary, stream, ensure_ascii=False, indent=2)
 
-    print(f"完成：共处理 {len(per_image)} 个输入帧，检测到 {total_faces} 张人脸。")
+    print(
+        f"完成：共处理 {len(per_image)} 个输入帧，"
+        f"关联主脸 {primary_frame_count} 帧，未关联 {len(per_image) - primary_frame_count} 帧；"
+        f"共保留 {total_faces} 个候选框。"
+    )
     if still_dir is not None:
         print(f"静态图片（{effective_save_images}）：{still_dir}，共 {saved_image_count} 张")
     if video_path is not None:
