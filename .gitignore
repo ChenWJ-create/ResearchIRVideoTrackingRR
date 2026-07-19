@@ -1,0 +1,67 @@
+# Codex / local workspace metadata
+/.agents/
+/.codex/
+
+# OS and editor files
+.DS_Store
+Thumbs.db
+Desktop.ini
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# Python caches and environments
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+.venv/
+venv/
+env/
+
+# Jupyter transient files
+.ipynb_checkpoints/
+
+# Logs and temporary files
+*.log
+*.tmp
+*.temp
+
+# Raw datasets and generated media
+*.bin
+*.avi
+*.mp4
+*.mov
+*.mkv
+*.npy
+*.npz
+*.raw
+**/output/
+**/outputs/
+**/runs/
+
+# Model and deployment artifacts
+*.pt
+*.pth
+*.onnx
+*.engine
+*.trt
+*.torchscript
+
+# User input images: retain only the placeholder
+/python_code/thermal_face_baseline/input_images/*
+!/python_code/thermal_face_baseline/input_images/.gitkeep
+
+# External source snapshots and local research material
+/github_file/
+/reference/
+/python_code/thermal_face_baseline/vendor/
+
+# Duplicate workspace entry pointing at python_code/thermal_face_baseline
+/thermal_face_baseline/

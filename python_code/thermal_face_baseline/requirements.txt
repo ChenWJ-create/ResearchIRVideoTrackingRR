@@ -1,0 +1,15 @@
+# 本机已验证的 CPU 基线。GPU/嵌入式设备请先安装与设备匹配的 PyTorch。
+torch==2.2.2
+torchvision==0.17.2
+numpy==1.26.4
+opencv-python==4.10.0.84
+Pillow>=9.0
+PyYAML>=6.0
+matplotlib>=3.4
+pandas>=1.2
+requests>=2.25
+scipy>=1.7
+seaborn==0.13.2
+thop==0.1.1.post2209072238
+tqdm==4.67.1
+ipykernel==6.29.5
